@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# 确保脚本在出错时退出
+set -e
+
+# 从local.properties读取Java配置
+if [ -f "local.properties" ]; then
+  JAVA_HOME=$(grep -E '^org.gradle.java.home=' local.properties | cut -d '=' -f 2)
+fi
+
+# 设置默认Java 11路径
+if [ -z "$JAVA_HOME" ]; then
+  JAVA_HOME="/Library/Java/JavaVirtualMachines/jdk-11.0.2.jdk/Contents/Home"
+fi
+
+# 设置Java可执行文件路径
+JAVA_EXE="$JAVA_HOME/bin/java"
+
+# 检查Java是否存在
+if [ ! -x "$JAVA_EXE" ]; then
+  echo "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME"
+  echo "Please set the JAVA_HOME variable in your environment to match the location of your Java installation."
+  exit 1
+fi
+
+# 应用主目录
+APP_HOME="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# 设置默认JVM选项
+DEFAULT_JVM_OPTS="-Dorg.gradle.java.home=$JAVA_HOME"
+
+# 构建命令行参数
+GRADLE_OPTS="$DEFAULT_JVM_OPTS $GRADLE_OPTS"
+
+# 检查gradle-wrapper.jar是否存在
+if [ ! -f "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" ]; then
+  echo "Error: gradle-wrapper.jar not found in $APP_HOME/gradle/wrapper/"
+  echo "Please download it manually from https://services.gradle.org/distributions/gradle-8.5-all.zip"
+  exit 1
+fi
+
+# 执行Gradle包装器
+exec "$JAVA_EXE" $GRADLE_OPTS -jar "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" "$@"

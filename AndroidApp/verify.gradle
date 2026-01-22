@@ -1,0 +1,2 @@
+println "Verification successful! Java version: ${org.gradle.internal.jvm.Jvm.current().javaVersion}"
+println "Gradle version: ${gradle.gradleVersion}"
