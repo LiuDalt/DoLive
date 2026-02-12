@@ -46,7 +46,8 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
     // 预览类型枚举
     enum class PreviewType {
         SURFACE_TEXTURE,
-        YUV
+        YUV,
+        SURFACE_TEXTURE_OFFSCREEN
     }
 
     private lateinit var glSurfaceView: GLSurfaceView
@@ -110,10 +111,10 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
             
             // 初始化渲染器，使用当前预览类型
             (cameraRenderer as CameraRendererProxy).initializeRenderer(
-                if (currentPreviewType == PreviewType.SURFACE_TEXTURE) {
-                    RendererFactory.OutputType.SURFACE_TEXTURE
-                } else {
-                    RendererFactory.OutputType.YUV
+                when (currentPreviewType) {
+                    PreviewType.SURFACE_TEXTURE -> RendererFactory.OutputType.SURFACE_TEXTURE
+                    PreviewType.YUV -> RendererFactory.OutputType.YUV
+                    PreviewType.SURFACE_TEXTURE_OFFSCREEN -> RendererFactory.OutputType.SURFACE_TEXTURE_OFFSCREEN
                 }
             )
         }
@@ -186,7 +187,7 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
             
             // 根据当前预览类型创建不同的相机捕获实例
             cameraCapture = when (currentPreviewType) {
-                PreviewType.SURFACE_TEXTURE -> {
+                PreviewType.SURFACE_TEXTURE, PreviewType.SURFACE_TEXTURE_OFFSCREEN -> {
                     requireNotNull(surfaceTexture) { "SurfaceTexture模式下SurfaceTexture不能为空" }
                     // 创建SurfaceTexture相机捕获实例
                     CameraCaptureFactory.createSurfaceTextureCapture(

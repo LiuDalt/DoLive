@@ -115,6 +115,7 @@ class RendererFactory {
             return when (outputType) {
                 OutputType.SURFACE_TEXTURE -> CameraRenderSurfaceTexture(context)
                 OutputType.YUV -> CameraRenderYuv(context)
+                OutputType.SURFACE_TEXTURE_OFFSCREEN -> CameraRenderSurfaceTextureOffscreen(context)
             }
         }
     }
@@ -124,6 +125,7 @@ class RendererFactory {
      */
     enum class OutputType {
         SURFACE_TEXTURE,
-        YUV
+        YUV,
+        SURFACE_TEXTURE_OFFSCREEN
     }
 }

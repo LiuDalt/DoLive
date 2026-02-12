@@ -57,6 +57,13 @@ class MainActivity : AppCompatActivity() {
                 previewType = PreviewActivity.PreviewType.YUV
             )
         )
+        featureList.add(
+            CameraFeatureItem(
+                id = 3,
+                title = "Camera2 SurfaceTexture预览-离屏滤镜效果",
+                previewType = PreviewActivity.PreviewType.SURFACE_TEXTURE_OFFSCREEN
+            )
+        )
     }
 
     /**
