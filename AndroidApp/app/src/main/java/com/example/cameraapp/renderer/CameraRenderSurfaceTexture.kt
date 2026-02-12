@@ -42,6 +42,7 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
         private const val TARGET_ASPECT_RATIO = 9.0f / 16.0f
         
         // SurfaceTexture着色器代码
+        // 顶点着色器（原始画面和效果画面共用）
         private const val VERTEX_SHADER = """
             attribute vec4 aPosition;
             attribute vec2 aTexCoord;
@@ -54,15 +55,44 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
             }
         """
 
-        private const val FRAGMENT_SHADER = """
+        // 原始画面片段着色器（无滤镜）
+        private const val FRAGMENT_SHADER_ORIGINAL = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
             varying vec2 vTexCoord;
             uniform samplerExternalOES sTexture;
             void main() {
-                gl_FragColor = texture2D(sTexture, vTexCoord);
+                // 直接输出原始纹理颜色
+                vec4 originalColor = texture2D(sTexture, vTexCoord);
+                gl_FragColor = originalColor;
             }
         """
+
+        // 效果画面片段着色器（带绿色滤镜）
+        private const val FRAGMENT_SHADER_FILTERED = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform samplerExternalOES sTexture;
+            void main() {
+                // 获取原始纹理颜色
+                vec4 originalColor = texture2D(sTexture, vTexCoord);
+                // 创建半透明纯绿色滤镜
+                vec4 greenFilter = vec4(0.0, 1.0, 0.0, 0.2);
+                // 应用滤镜，使用混合模式保留原始图像内容
+                gl_FragColor = originalColor * (1.0 - greenFilter.a) + greenFilter * greenFilter.a;
+                // 保持原始Alpha值
+                gl_FragColor.a = originalColor.a;
+            }
+        """
+
+        // 效果画面顶点坐标（右下角1/3大小）
+        private val EFFECT_VERTEX_COORDINATES = floatArrayOf(
+            0.3333f, -0.3333f,   // 左下角
+            0.3333f, -1.0f,       // 右下角
+            1.0f, -0.3333f,       // 左上角
+            1.0f, -1.0f           // 右上角
+        )
 
         // 顶点和纹理坐标
         private val VERTEX_COORDINATES = floatArrayOf(
@@ -128,15 +158,24 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
     // OpenGL相关资源
     private var surfaceTexture: SurfaceTexture? = null
     private var externalTextureId = 0
-    private var programId = 0
-    private var positionHandle = 0
-    private var texCoordHandle = 0
-    private var mvpMatrixHandle = 0
-    private var stMatrixHandle = 0
-    private var textureHandle = 0
+    // 原始画面着色器程序
+    private var originalProgramId = 0
+    private var originalPositionHandle = 0
+    private var originalTexCoordHandle = 0
+    private var originalMvpMatrixHandle = 0
+    private var originalStMatrixHandle = 0
+    private var originalTextureHandle = 0
+    // 效果画面着色器程序
+    private var filteredProgramId = 0
+    private var filteredPositionHandle = 0
+    private var filteredTexCoordHandle = 0
+    private var filteredMvpMatrixHandle = 0
+    private var filteredStMatrixHandle = 0
+    private var filteredTextureHandle = 0
     
     // OpenGL矩阵和缓冲区
     private val vertexBuffer: FloatBuffer
+    private val effectVertexBuffer: FloatBuffer
     private val frontTexCoordBuffer: FloatBuffer
     private val rearTexCoordBuffer: FloatBuffer
     private val mvpMatrix = FloatArray(16)
@@ -153,6 +192,7 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
         
         // 初始化顶点和纹理坐标缓冲区
         vertexBuffer = createFloatBuffer(VERTEX_COORDINATES)
+        effectVertexBuffer = createFloatBuffer(EFFECT_VERTEX_COORDINATES)
         frontTexCoordBuffer = createFloatBuffer(FRONT_CAMERA_TEXTURE_COORDINATES)
         rearTexCoordBuffer = createFloatBuffer(REAR_CAMERA_TEXTURE_COORDINATES)
         
@@ -199,8 +239,10 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
             surfaceTextureCallback?.onSurfaceTextureAvailable(it)
         }
 
-        // 创建和链接着色器程序
-        createAndLinkShaderProgram()
+        // 创建和链接原始画面着色器程序
+        createAndLinkShaderProgram(true)
+        // 创建和链接效果画面着色器程序
+        createAndLinkShaderProgram(false)
         
         // 获取着色器属性和统一变量位置
         getShaderHandles()
@@ -224,12 +266,16 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
     
     /**
      * 创建并链接着色器程序
+     * 
+     * @param isOriginal true表示创建原始画面着色器程序，false表示创建效果画面着色器程序
      */
-    private fun createAndLinkShaderProgram() {
-        val vertexShaderId = loadShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
-        val fragmentShaderId = loadShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
+    private fun createAndLinkShaderProgram(isOriginal: Boolean) {
+        val fragmentShaderCode = if (isOriginal) FRAGMENT_SHADER_ORIGINAL else FRAGMENT_SHADER_FILTERED
         
-        programId = GLES20.glCreateProgram()
+        val vertexShaderId = loadShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
+        val fragmentShaderId = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode)
+        
+        val programId = GLES20.glCreateProgram()
         GLES20.glAttachShader(programId, vertexShaderId)
         GLES20.glAttachShader(programId, fragmentShaderId)
         GLES20.glLinkProgram(programId)
@@ -240,7 +286,14 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
         if (linkStatus[0] != GLES20.GL_TRUE) {
             Log.e(TAG, "Could not link program: " + GLES20.glGetProgramInfoLog(programId))
             GLES20.glDeleteProgram(programId)
-            programId = 0
+            return
+        }
+        
+        // 保存程序ID
+        if (isOriginal) {
+            originalProgramId = programId
+        } else {
+            filteredProgramId = programId
         }
     }
     
@@ -248,11 +301,19 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
      * 获取着色器属性和统一变量位置
      */
     private fun getShaderHandles() {
-        positionHandle = GLES20.glGetAttribLocation(programId, "aPosition")
-        texCoordHandle = GLES20.glGetAttribLocation(programId, "aTexCoord")
-        mvpMatrixHandle = GLES20.glGetUniformLocation(programId, "uMVPMatrix")
-        stMatrixHandle = GLES20.glGetUniformLocation(programId, "uSTMatrix")
-        textureHandle = GLES20.glGetUniformLocation(programId, "sTexture")
+        // 获取原始画面着色器程序的句柄
+        originalPositionHandle = GLES20.glGetAttribLocation(originalProgramId, "aPosition")
+        originalTexCoordHandle = GLES20.glGetAttribLocation(originalProgramId, "aTexCoord")
+        originalMvpMatrixHandle = GLES20.glGetUniformLocation(originalProgramId, "uMVPMatrix")
+        originalStMatrixHandle = GLES20.glGetUniformLocation(originalProgramId, "uSTMatrix")
+        originalTextureHandle = GLES20.glGetUniformLocation(originalProgramId, "sTexture")
+        
+        // 获取效果画面着色器程序的句柄
+        filteredPositionHandle = GLES20.glGetAttribLocation(filteredProgramId, "aPosition")
+        filteredTexCoordHandle = GLES20.glGetAttribLocation(filteredProgramId, "aTexCoord")
+        filteredMvpMatrixHandle = GLES20.glGetUniformLocation(filteredProgramId, "uMVPMatrix")
+        filteredStMatrixHandle = GLES20.glGetUniformLocation(filteredProgramId, "uSTMatrix")
+        filteredTextureHandle = GLES20.glGetUniformLocation(filteredProgramId, "sTexture")
     }
 
     override fun onSurfaceChanged(gl: javax.microedition.khronos.opengles.GL10?, width: Int, height: Int) {
@@ -414,18 +475,18 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
     }
     
     /**
-     * 绘制相机预览
+     * 绘制原始相机预览画面
      */
-    private fun drawPreview() {
-        // 使用着色器程序
-        GLES20.glUseProgram(programId)
+    private fun drawOriginalPreview() {
+        // 使用原始画面着色器程序
+        GLES20.glUseProgram(originalProgramId)
 
         // 启用顶点属性数组
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glEnableVertexAttribArray(texCoordHandle)
+        GLES20.glEnableVertexAttribArray(originalPositionHandle)
+        GLES20.glEnableVertexAttribArray(originalTexCoordHandle)
 
         // 设置顶点坐标
-        GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 8, vertexBuffer)
+        GLES20.glVertexAttribPointer(originalPositionHandle, 2, GLES20.GL_FLOAT, false, 8, vertexBuffer)
         
         // 根据摄像头方向选择合适的纹理坐标缓冲区
         val texCoordBuffer = if (currentCameraLens == CameraCharacteristics.LENS_FACING_FRONT) {
@@ -433,23 +494,72 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
         } else {
             rearTexCoordBuffer
         }
-        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 8, texCoordBuffer)
+        GLES20.glVertexAttribPointer(originalTexCoordHandle, 2, GLES20.GL_FLOAT, false, 8, texCoordBuffer)
 
         // 设置MVP矩阵和纹理变换矩阵
-        GLES20.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniformMatrix4fv(stMatrixHandle, 1, false, stMatrix, 0)
+        GLES20.glUniformMatrix4fv(originalMvpMatrixHandle, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(originalStMatrixHandle, 1, false, stMatrix, 0)
 
         // 激活纹理单元并绑定纹理
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTextureId)
-        GLES20.glUniform1i(textureHandle, 0) // 将纹理单元0绑定到采样器
+        GLES20.glUniform1i(originalTextureHandle, 0) // 将纹理单元0绑定到采样器
 
         // 绘制四边形，使用三角形条带模式
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
         // 禁用顶点属性数组
-        GLES20.glDisableVertexAttribArray(positionHandle)
-        GLES20.glDisableVertexAttribArray(texCoordHandle)
+        GLES20.glDisableVertexAttribArray(originalPositionHandle)
+        GLES20.glDisableVertexAttribArray(originalTexCoordHandle)
+    }
+    
+    /**
+     * 绘制效果画面（右下角1/3大小，带绿色滤镜）
+     */
+    private fun drawEffectPreview() {
+        // 使用效果画面着色器程序
+        GLES20.glUseProgram(filteredProgramId)
+
+        // 启用顶点属性数组
+        GLES20.glEnableVertexAttribArray(filteredPositionHandle)
+        GLES20.glEnableVertexAttribArray(filteredTexCoordHandle)
+
+        // 设置效果画面顶点坐标（右下角1/3大小）
+        GLES20.glVertexAttribPointer(filteredPositionHandle, 2, GLES20.GL_FLOAT, false, 8, effectVertexBuffer)
+        
+        // 根据摄像头方向选择合适的纹理坐标缓冲区
+        val texCoordBuffer = if (currentCameraLens == CameraCharacteristics.LENS_FACING_FRONT) {
+            frontTexCoordBuffer
+        } else {
+            rearTexCoordBuffer
+        }
+        GLES20.glVertexAttribPointer(filteredTexCoordHandle, 2, GLES20.GL_FLOAT, false, 8, texCoordBuffer)
+
+        // 设置MVP矩阵和纹理变换矩阵
+        GLES20.glUniformMatrix4fv(filteredMvpMatrixHandle, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(filteredStMatrixHandle, 1, false, stMatrix, 0)
+
+        // 激活纹理单元并绑定纹理
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTextureId)
+        GLES20.glUniform1i(filteredTextureHandle, 0) // 将纹理单元0绑定到采样器
+
+        // 绘制四边形，使用三角形条带模式
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        // 禁用顶点属性数组
+        GLES20.glDisableVertexAttribArray(filteredPositionHandle)
+        GLES20.glDisableVertexAttribArray(filteredTexCoordHandle)
+    }
+    
+    /**
+     * 绘制相机预览（包含原始画面和效果画面）
+     */
+    private fun drawPreview() {
+        // 绘制原始画面作为基底
+        drawOriginalPreview()
+        // 绘制效果画面（右下角1/3大小，带绿色滤镜）
+        drawEffectPreview()
     }
 
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
@@ -529,9 +639,13 @@ class CameraRenderSurfaceTexture(private val context: Context) : SurfaceTextureR
         }
         
         // 释放OpenGL程序资源
-        if (programId != 0) {
-            GLES20.glDeleteProgram(programId)
-            programId = 0
+        if (originalProgramId != 0) {
+            GLES20.glDeleteProgram(originalProgramId)
+            originalProgramId = 0
+        }
+        if (filteredProgramId != 0) {
+            GLES20.glDeleteProgram(filteredProgramId)
+            filteredProgramId = 0
         }
         
         Log.d(TAG, "资源释放完成")

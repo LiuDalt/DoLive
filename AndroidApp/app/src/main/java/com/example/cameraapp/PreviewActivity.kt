@@ -166,7 +166,7 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
         Log.d(TAG, "SurfaceTexture可用")
         this.surfaceTexture = surfaceTexture
         // 如果已经获取了相机权限，则启动相机
-        if (hasCameraPermission) {
+        if (hasCameraPermission && surfaceTexture != null) {
             startCamera(surfaceTexture)
         }
     }
@@ -307,7 +307,7 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
         // 恢复GLSurfaceView
         glSurfaceView.onResume()
         // 根据预览类型启动相机
-        if (hasCameraPermission) {
+        if (hasCameraPermission && surfaceTexture != null) {
             startCamera(surfaceTexture)
         }
     }
