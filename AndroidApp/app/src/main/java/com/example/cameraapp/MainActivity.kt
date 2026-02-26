@@ -64,6 +64,13 @@ class MainActivity : AppCompatActivity() {
                 previewType = PreviewActivity.PreviewType.SURFACE_TEXTURE_OFFSCREEN
             )
         )
+        featureList.add(
+            CameraFeatureItem(
+                id = 4,
+                title = "Camera2 SurfaceTexture预览-离屏滤镜&共享Context",
+                previewType = PreviewActivity.PreviewType.SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT
+            )
+        )
     }
 
     /**

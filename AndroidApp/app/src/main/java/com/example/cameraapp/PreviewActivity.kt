@@ -47,7 +47,8 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
     enum class PreviewType {
         SURFACE_TEXTURE,
         YUV,
-        SURFACE_TEXTURE_OFFSCREEN
+        SURFACE_TEXTURE_OFFSCREEN,
+        SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT
     }
 
     private lateinit var glSurfaceView: GLSurfaceView
@@ -110,13 +111,14 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
             (cameraRenderer as CameraRendererProxy).setSurfaceTextureCallback(this)
             
             // 初始化渲染器，使用当前预览类型
-            (cameraRenderer as CameraRendererProxy).initializeRenderer(
-                when (currentPreviewType) {
-                    PreviewType.SURFACE_TEXTURE -> RendererFactory.OutputType.SURFACE_TEXTURE
-                    PreviewType.YUV -> RendererFactory.OutputType.YUV
-                    PreviewType.SURFACE_TEXTURE_OFFSCREEN -> RendererFactory.OutputType.SURFACE_TEXTURE_OFFSCREEN
-                }
-            )
+                (cameraRenderer as CameraRendererProxy).initializeRenderer(
+                    when (currentPreviewType) {
+                        PreviewType.SURFACE_TEXTURE -> RendererFactory.OutputType.SURFACE_TEXTURE
+                        PreviewType.YUV -> RendererFactory.OutputType.YUV
+                        PreviewType.SURFACE_TEXTURE_OFFSCREEN -> RendererFactory.OutputType.SURFACE_TEXTURE_OFFSCREEN
+                        PreviewType.SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT -> RendererFactory.OutputType.SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT
+                    }
+                )
         }
         glSurfaceView.setRenderer(cameraRenderer)
         // 设置渲染模式为持续渲染，确保相机预览流畅
@@ -187,7 +189,7 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
             
             // 根据当前预览类型创建不同的相机捕获实例
             cameraCapture = when (currentPreviewType) {
-                PreviewType.SURFACE_TEXTURE, PreviewType.SURFACE_TEXTURE_OFFSCREEN -> {
+                PreviewType.SURFACE_TEXTURE, PreviewType.SURFACE_TEXTURE_OFFSCREEN, PreviewType.SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT -> {
                     requireNotNull(surfaceTexture) { "SurfaceTexture模式下SurfaceTexture不能为空" }
                     // 创建SurfaceTexture相机捕获实例
                     CameraCaptureFactory.createSurfaceTextureCapture(

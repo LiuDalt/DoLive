@@ -116,6 +116,7 @@ class RendererFactory {
                 OutputType.SURFACE_TEXTURE -> CameraRenderSurfaceTexture(context)
                 OutputType.YUV -> CameraRenderYuv(context)
                 OutputType.SURFACE_TEXTURE_OFFSCREEN -> CameraRenderSurfaceTextureOffscreen(context)
+                OutputType.SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT -> CameraRenderSurfaceTextureOffScreenSharedContext(context)
             }
         }
     }
@@ -126,6 +127,7 @@ class RendererFactory {
     enum class OutputType {
         SURFACE_TEXTURE,
         YUV,
-        SURFACE_TEXTURE_OFFSCREEN
+        SURFACE_TEXTURE_OFFSCREEN,
+        SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT
     }
 }
