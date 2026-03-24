@@ -44,7 +44,6 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         // 调试相关常量
         private const val MAX_DEBUG_IMAGES = 5
         private const val DEBUG_SAVE_INTERVAL = 5L // 秒
-        private const val DEBUG_IMAGE_DIR_NAME = "temimages"
         
         // 相机相关常量
         private const val DEFAULT_PREVIEW_WIDTH = 720
@@ -151,6 +150,11 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     // 相机配置
     private var cameraPreviewWidth = DEFAULT_PREVIEW_WIDTH
     private var cameraPreviewHeight = DEFAULT_PREVIEW_HEIGHT
+
+    // 初始为 false，等待 setPreviewSize 被调用后再更新
+    // 避免在相机预览尺寸确定前就更新纹理，导致尺寸不匹配
+    @Volatile
+    private var needUpdateTextureSize = false
     private var currentCameraLens = CameraCharacteristics.LENS_FACING_FRONT
     
     // 视口管理
@@ -161,6 +165,8 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     
     // Debug功能管理
     private val debugImageCounter = AtomicInteger(0)
+    private val offscreenImageCounter = AtomicInteger(0)
+    private val displayImageCounter = AtomicInteger(0)
     private val debugImageDir: File
     private val saveTimer = Executors.newSingleThreadScheduledExecutor()
     private var isTimerRunning = false
@@ -216,6 +222,10 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     private val sharedTextureCondition = sharedTextureLock.newCondition()
     private var isSharedTextureReady = false
     
+    // 离屏纹理保存标志
+    @Volatile
+    private var saveOffscreenFlag = false
+    
     init {
         // 初始化OpenGL矩阵
         Matrix.setIdentityM(mvpMatrix, 0)
@@ -228,11 +238,11 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         rearTexCoordBuffer = createFloatBuffer(REAR_CAMERA_TEXTURE_COORDINATES)
         
         // 初始化debug图片保存目录
-        val externalDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-        debugImageDir = File(externalDir, DEBUG_IMAGE_DIR_NAME)
-        if (!debugImageDir.exists()) {
-            debugImageDir.mkdirs()
-        }
+                val externalDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                debugImageDir = File(externalDir, "tem_imgs")
+                if (!debugImageDir.exists()) {
+                    debugImageDir.mkdirs()
+                }
     }
     
     /**
@@ -254,6 +264,10 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     
     override fun onSurfaceCreated(gl: javax.microedition.khronos.opengles.GL10?, config: javax.microedition.khronos.egl.EGLConfig?) {
         Log.d(TAG, "onSurfaceCreated")
+
+        // 重置状态变量
+        isSharedTextureReady = false
+        sharedTextureId = 0
 
         // 保存EGL上下文
         saveEGLContext()
@@ -315,9 +329,17 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
      */
     private fun startOffscreenThread() {
         if (eglContext != null && eglDisplay != null && eglConfig != null) {
-            offscreenThread = OffScreenThread(eglDisplay!!, eglContext!!, eglConfig!!, externalTextureId)
+            // 使用当前相机预览尺寸启动离屏线程，确保初始化时使用正确的尺寸
+            offscreenThread = OffScreenThread(
+                eglDisplay!!, 
+                eglContext!!, 
+                eglConfig!!, 
+                externalTextureId,
+                cameraPreviewWidth,
+                cameraPreviewHeight
+            )
             offscreenThread?.start()
-            Log.d(TAG, "离屏渲染线程已启动")
+            Log.d(TAG, "离屏渲染线程已启动，初始尺寸: ${cameraPreviewWidth}x${cameraPreviewHeight}")
         } else {
             Log.e(TAG, "EGL上下文未初始化，无法启动离屏渲染线程")
         }
@@ -341,8 +363,15 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     
     /**
      * 创建离屏渲染资源
+     * 
+     * 修复：使用互换后的尺寸创建纹理，与离屏线程保持一致
+     * 相机预览帧是横屏的（宽>高），需要旋转90度显示，所以宽高互换
      */
     private fun createOffscreenRenderingResources() {
+        // 使用互换后的尺寸，与离屏线程初始化逻辑保持一致
+        val textureWidth = cameraPreviewHeight
+        val textureHeight = cameraPreviewWidth
+        
         // 创建离屏纹理
         val textures = IntArray(1)
         GLES20.glGenTextures(1, textures, 0)
@@ -354,8 +383,8 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
             GLES20.GL_TEXTURE_2D,
             0,
             GLES20.GL_RGBA,
-            cameraPreviewWidth,
-            cameraPreviewHeight,
+            textureWidth,
+            textureHeight,
             0,
             GLES20.GL_RGBA,
             GLES20.GL_UNSIGNED_BYTE,
@@ -389,6 +418,8 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         
         // 解绑帧缓冲区
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        
+        Log.d(TAG, "主线程离屏纹理创建成功: ${textureWidth}x${textureHeight}")
     }
     
     /**
@@ -514,30 +545,11 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         // 计算符合目标宽高比的视口尺寸
         calculateAndSetViewport(width, height)
         
-        // 更新离屏纹理尺寸
-        updateOffscreenTextureSize(width, height)
+        // 注意：不在此处设置 needUpdateTextureSize
+        // 纹理尺寸更新将在 setPreviewSize 被调用后触发，确保使用正确的相机预览尺寸
         
         // 启动定时保存图片的任务
         startDebugSaveTask()
-    }
-    
-    /**
-     * 更新离屏纹理尺寸
-     */
-    private fun updateOffscreenTextureSize(width: Int, height: Int) {
-        // 绑定离屏纹理并更新尺寸
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, offscreenTextureId)
-        GLES20.glTexImage2D(
-            GLES20.GL_TEXTURE_2D,
-            0,
-            GLES20.GL_RGBA,
-            width,
-            height,
-            0,
-            GLES20.GL_RGBA,
-            GLES20.GL_UNSIGNED_BYTE,
-            null
-        )
     }
     
     /**
@@ -573,6 +585,7 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         actualViewportHeight = viewportHeight
         actualViewportX = viewportX
         actualViewportY = viewportY
+        Log.e(TAG, "cal viewPort: width:${actualViewportWidth} height:${actualViewportHeight} x:${actualViewportX} y:${actualViewportY}");
         
         // 设置视口，实现目标比例居中显示
         GLES20.glViewport(viewportX, viewportY, viewportWidth, viewportHeight)
@@ -588,6 +601,8 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
             saveTimer.scheduleAtFixedRate({
                 // 设置保存帧标志，由onDrawFrame在GL线程中处理
                 saveFrameFlag = true
+                // 设置保存离屏纹理标志，由离屏线程处理
+                saveOffscreenFlag = true
             }, 0, DEBUG_SAVE_INTERVAL, TimeUnit.SECONDS)
             isTimerRunning = true
         }
@@ -600,10 +615,12 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
      */
     private fun saveCurrentFrameToFile() {
         // 检查是否已达到最大保存数量
-        if (debugImageCounter.get() >= MAX_DEBUG_IMAGES) {
-            Log.d(TAG, "已达到最大保存数量，停止保存")
-            saveTimer.shutdown()
-            isTimerRunning = false
+        if (displayImageCounter.get() >= MAX_DEBUG_IMAGES) {
+            // 如果离屏也达到最大保存数量，停止保存任务
+            if (offscreenImageCounter.get() >= MAX_DEBUG_IMAGES) {
+                saveTimer.shutdown()
+                isTimerRunning = false
+            }
             return
         }
         
@@ -627,9 +644,9 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
                         debugImageDir.mkdirs()
                     }
                     
-                    // 生成文件名：num_width_height.png，使用相机预览尺寸
-                    val imageNum = debugImageCounter.incrementAndGet()
-                    val fileName = "${imageNum}_${cameraPreviewWidth}_${cameraPreviewHeight}.png"
+                    // 生成文件名：display_count_width_height.png
+                    val imageNum = displayImageCounter.incrementAndGet()
+                    val fileName = "display_${imageNum}_${actualViewportWidth}_${actualViewportHeight}.png"
                     val file = File(debugImageDir, fileName)
                     
                     // 保存Bitmap到文件
@@ -638,7 +655,7 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
                     fos.flush()
                     fos.close()
                     
-                    Log.d(TAG, "成功保存图片: ${file.absolutePath}")
+                    Log.d(TAG, "成功保存上屏后图片: ${file.absolutePath}")
                     
                     // 释放Bitmap资源
                     bitmap.recycle()
@@ -652,6 +669,16 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     }
 
     override fun onDrawFrame(gl: javax.microedition.khronos.opengles.GL10?) {
+
+        // 确保离屏线程初始化完成后再更新尺寸
+        if (needUpdateTextureSize && isSharedTextureReady) {
+            // 更新离屏线程纹理尺寸
+            // 注意：updateTextureSize 内部会进行尺寸互换，所以传入原始相机预览尺寸
+            Log.d(TAG, "onDrawFrame: 更新离屏纹理尺寸为: ${cameraPreviewWidth}x${cameraPreviewHeight}")
+            offscreenThread?.updateTextureSize(cameraPreviewWidth, cameraPreviewHeight)
+            needUpdateTextureSize = false
+        }
+
         // 清除颜色缓冲区
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
@@ -685,6 +712,9 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         
         if (isSharedTextureReady && sharedTextureId != 0) {
             try {
+                // 确保使用正确的视口
+                GLES20.glViewport(actualViewportX, actualViewportY, actualViewportWidth, actualViewportHeight)
+                
                 // 使用最终合成着色器程序
                 GLES20.glUseProgram(composeProgramId)
 
@@ -724,168 +754,7 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
             }
         }
     }
-    
-    /**
-     * 同步更新SurfaceTexture纹理内容
-     */
-    private fun updateTextureIfAvailable() {
-        synchronized(frameAvailableLock) {
-            if (frameAvailable && isCameraReady) {
-                try {
-                    surfaceTexture?.updateTexImage() // 更新纹理内容
-                    surfaceTexture?.getTransformMatrix(stMatrix) // 获取纹理变换矩阵
-                    frameAvailable = false
-                } catch (e: RuntimeException) {
-                    Log.e(TAG, "Error updating texture: ${e.message}", e)
-                    // 如果更新纹理失败，不重置frameAvailable标志，继续等待有效帧
-                }
-            }
-        }
-    }
-    
-    /**
-     * 执行离屏渲染
-     */
-    private fun performOffscreenRendering() {
-        // 绑定离屏帧缓冲区
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebufferId)
-        
-        // 设置视口为离屏纹理大小
-        GLES20.glViewport(0, 0, actualViewportWidth, actualViewportHeight)
-        
-        // 清除离屏缓冲区
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        
-        // 绘制原始相机预览画面
-        drawOriginalPreview()
-        
-        // 绘制效果画面（右下角1/3大小，带绿色滤镜）
-        drawEffectPreview()
-        
-        // 解绑帧缓冲区，恢复到默认帧缓冲区
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-    }
-    
-    /**
-     * 绘制原始相机预览画面
-     */
-    private fun drawOriginalPreview() {
-        // 使用原始画面着色器程序
-        GLES20.glUseProgram(originalProgramId)
 
-        // 启用顶点属性数组
-        GLES20.glEnableVertexAttribArray(originalPositionHandle)
-        GLES20.glEnableVertexAttribArray(originalTexCoordHandle)
-
-        // 设置顶点坐标
-        GLES20.glVertexAttribPointer(originalPositionHandle, 2, GLES20.GL_FLOAT, false, 8, vertexBuffer)
-        
-        // 根据摄像头方向选择合适的纹理坐标缓冲区
-        val texCoordBuffer = if (currentCameraLens == CameraCharacteristics.LENS_FACING_FRONT) {
-            frontTexCoordBuffer
-        } else {
-            rearTexCoordBuffer
-        }
-        GLES20.glVertexAttribPointer(originalTexCoordHandle, 2, GLES20.GL_FLOAT, false, 8, texCoordBuffer)
-
-        // 设置MVP矩阵和纹理变换矩阵
-        GLES20.glUniformMatrix4fv(originalMvpMatrixHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniformMatrix4fv(originalStMatrixHandle, 1, false, stMatrix, 0)
-
-        // 激活纹理单元并绑定纹理
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTextureId)
-        GLES20.glUniform1i(originalTextureHandle, 0) // 将纹理单元0绑定到采样器
-
-        // 绘制四边形，使用三角形条带模式
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-        // 禁用顶点属性数组
-        GLES20.glDisableVertexAttribArray(originalPositionHandle)
-        GLES20.glDisableVertexAttribArray(originalTexCoordHandle)
-    }
-    
-    /**
-     * 绘制效果画面（右下角1/3大小，带绿色滤镜）
-     */
-    private fun drawEffectPreview() {
-        // 使用效果画面着色器程序
-        GLES20.glUseProgram(filteredProgramId)
-
-        // 启用顶点属性数组
-        GLES20.glEnableVertexAttribArray(filteredPositionHandle)
-        GLES20.glEnableVertexAttribArray(filteredTexCoordHandle)
-
-        // 设置效果画面顶点坐标（右下角1/3大小）
-        GLES20.glVertexAttribPointer(filteredPositionHandle, 2, GLES20.GL_FLOAT, false, 8, effectVertexBuffer)
-        
-        // 根据摄像头方向选择合适的纹理坐标缓冲区
-        val texCoordBuffer = if (currentCameraLens == CameraCharacteristics.LENS_FACING_FRONT) {
-            frontTexCoordBuffer
-        } else {
-            rearTexCoordBuffer
-        }
-        GLES20.glVertexAttribPointer(filteredTexCoordHandle, 2, GLES20.GL_FLOAT, false, 8, texCoordBuffer)
-
-        // 设置MVP矩阵和纹理变换矩阵
-        GLES20.glUniformMatrix4fv(filteredMvpMatrixHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniformMatrix4fv(filteredStMatrixHandle, 1, false, stMatrix, 0)
-
-        // 激活纹理单元并绑定纹理
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTextureId)
-        GLES20.glUniform1i(filteredTextureHandle, 0) // 将纹理单元0绑定到采样器
-
-        // 绘制四边形，使用三角形条带模式
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-        // 禁用顶点属性数组
-        GLES20.glDisableVertexAttribArray(filteredPositionHandle)
-        GLES20.glDisableVertexAttribArray(filteredTexCoordHandle)
-    }
-    
-    /**
-     * 绘制最终合成画面
-     */
-    private fun drawComposeResult() {
-        // 恢复原始视口
-        GLES20.glViewport(actualViewportX, actualViewportY, actualViewportWidth, actualViewportHeight)
-        
-        // 使用最终合成着色器程序
-        GLES20.glUseProgram(composeProgramId)
-
-        // 启用顶点属性数组
-        GLES20.glEnableVertexAttribArray(composePositionHandle)
-        GLES20.glEnableVertexAttribArray(composeTexCoordHandle)
-
-        // 设置顶点坐标
-        GLES20.glVertexAttribPointer(composePositionHandle, 2, GLES20.GL_FLOAT, false, 8, vertexBuffer)
-        
-        // 设置全屏纹理坐标（0-1范围）
-        val fullscreenTexCoords = floatArrayOf(
-            0.0f, 1.0f,
-            0.0f, 0.0f,
-            1.0f, 1.0f,
-            1.0f, 0.0f
-        )
-        val texCoordBuffer = createFloatBuffer(fullscreenTexCoords)
-        GLES20.glVertexAttribPointer(composeTexCoordHandle, 2, GLES20.GL_FLOAT, false, 8, texCoordBuffer)
-
-        // 设置MVP矩阵
-        GLES20.glUniformMatrix4fv(composeMvpMatrixHandle, 1, false, mvpMatrix, 0)
-
-        // 激活纹理单元并绑定离屏纹理
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, offscreenTextureId)
-        GLES20.glUniform1i(composeTextureHandle, 0) // 将纹理单元0绑定到采样器
-
-        // 绘制四边形，使用三角形条带模式
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-        // 禁用顶点属性数组
-        GLES20.glDisableVertexAttribArray(composePositionHandle)
-        GLES20.glDisableVertexAttribArray(composeTexCoordHandle)
-    }
 
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
         // 只有当相机准备好时，才设置frameAvailable标志
@@ -930,9 +799,23 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     }
     
     override fun setPreviewSize(width: Int, height: Int) {
-        cameraPreviewWidth = width
-        cameraPreviewHeight = height
-        Log.d(TAG, "设置相机预览尺寸: $width x $height")
+        // 只在尺寸真正变化时才更新
+        if (cameraPreviewWidth != width || cameraPreviewHeight != height) {
+            cameraPreviewWidth = width
+            cameraPreviewHeight = height
+            
+            // 如果离屏线程已准备好，立即更新尺寸
+            // 否则在 onDrawFrame 中等待准备好后再更新
+            if (isSharedTextureReady) {
+                offscreenThread?.updateTextureSize(cameraPreviewWidth, cameraPreviewHeight)
+                Log.d(TAG, "设置相机预览尺寸: ${width}x${height}，已立即更新纹理")
+            } else {
+                needUpdateTextureSize = true
+                Log.d(TAG, "设置相机预览尺寸: ${width}x${height}，等待离屏线程准备好后更新")
+            }
+        } else {
+            Log.d(TAG, "相机预览尺寸未变化: ${width}x${height}")
+        }
     }
     
     override fun setCameraLensFacing(lensFacing: Int) {
@@ -961,6 +844,15 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         
         // 重置相机准备状态
         isCameraReady = false
+        
+        // 重置共享纹理状态
+        sharedTextureLock.lock()
+        try {
+            isSharedTextureReady = false
+            sharedTextureId = 0
+        } finally {
+            sharedTextureLock.unlock()
+        }
         
         // 释放OpenGL纹理资源
         if (externalTextureId != 0) {
@@ -1015,13 +907,20 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         private val eglDisplay: EGLDisplay,
         private val sharedContext: EGLContext,
         private val eglConfig: EGLConfig,
-        private val externalTextureId: Int
+        private val externalTextureId: Int,
+        private val initialPreviewWidth: Int,
+        private val initialPreviewHeight: Int
     ) : Thread() {
         private var isRunning = true
         private var localEglContext: EGLContext? = null
         private var localEglSurface: EGLSurface? = null
         private var localFramebufferId = 0
         private var localTextureId = 0
+        // 使用内部变量存储当前纹理尺寸，避免与外部类的竞态条件
+        @Volatile
+        private var currentTextureWidth = initialPreviewHeight  // 互换后的宽度
+        @Volatile
+        private var currentTextureHeight = initialPreviewWidth  // 互换后的高度
         // 着色器程序
         private var originalProgramId = 0
         private var filteredProgramId = 0
@@ -1050,7 +949,49 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
             Matrix.setIdentityM(localMvpMatrix, 0)
             Matrix.setIdentityM(localStMatrix, 0)
         }
-        
+
+        /**
+         * 清理资源
+         */
+        private fun cleanup() {
+            try {
+                // 解绑上下文
+                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+
+                // 销毁表面
+                if (localEglSurface != null) {
+                    EGL14.eglDestroySurface(eglDisplay, localEglSurface)
+                }
+
+                // 销毁上下文
+                if (localEglContext != null) {
+                    EGL14.eglDestroyContext(eglDisplay, localEglContext)
+                }
+
+                // 释放OpenGL资源
+                if (localFramebufferId != 0) {
+                    val framebuffers = intArrayOf(localFramebufferId)
+                    GLES20.glDeleteFramebuffers(1, framebuffers, 0)
+                }
+
+                if (localTextureId != 0) {
+                    val textures = intArrayOf(localTextureId)
+                    GLES20.glDeleteTextures(1, textures, 0)
+                }
+
+                if (originalProgramId != 0) {
+                    GLES20.glDeleteProgram(originalProgramId)
+                }
+
+                if (filteredProgramId != 0) {
+                    GLES20.glDeleteProgram(filteredProgramId)
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "清理资源异常: ${e.message}", e)
+            }
+        }
+
         override fun run() {
             Log.d(TAG, "离屏渲染线程开始运行")
             Log.d(TAG, "EGL参数: display=$eglDisplay, config=$eglConfig, sharedContext=$sharedContext")
@@ -1147,10 +1088,13 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
                     return false
                 }
                 
-                // 创建离屏表面
+                // 创建离屏表面，考虑旋转90度，所以宽高互换
+                // 使用传入的初始尺寸，避免与外部变量的竞态条件
+                val surfaceWidth = initialPreviewHeight
+                val surfaceHeight = initialPreviewWidth
                 val surfaceAttribs = intArrayOf(
-                    EGL14.EGL_WIDTH, cameraPreviewWidth,
-                    EGL14.EGL_HEIGHT, cameraPreviewHeight,
+                    EGL14.EGL_WIDTH, surfaceWidth,
+                    EGL14.EGL_HEIGHT, surfaceHeight,
                     EGL14.EGL_NONE
                 )
                 localEglSurface = EGL14.eglCreatePbufferSurface(
@@ -1180,14 +1124,18 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
          * 初始化OpenGL资源
          */
         private fun initializeOpenGL() {
-            // 创建离屏纹理
+            // 创建离屏纹理，考虑旋转90度，所以宽高互换
+            // 使用传入的初始尺寸，避免与外部变量的竞态条件
+            val textureWidth = initialPreviewHeight
+            val textureHeight = initialPreviewWidth
+            Log.d(TAG, "创建离屏纹理widthxheight: $textureWidth x $textureHeight (初始尺寸: ${initialPreviewWidth}x${initialPreviewHeight})")
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
             localTextureId = textures[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, localTextureId)
             GLES20.glTexImage2D(
                 GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                cameraPreviewWidth, cameraPreviewHeight, 0,
+                textureWidth, textureHeight, 0,
                 GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
             )
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -1271,7 +1219,10 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
             try {
                 // 绑定帧缓冲区
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, localFramebufferId)
-                GLES20.glViewport(0, 0, cameraPreviewWidth, cameraPreviewHeight)
+                // 使用内部存储的纹理尺寸作为视口，避免与外部类的竞态条件
+                val viewportWidth = currentTextureWidth
+                val viewportHeight = currentTextureHeight
+                GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 
                 // 1. 绘制主体相机画面（无滤镜）
@@ -1280,13 +1231,88 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
                 // 2. 绘制右下角小窗（带绿色滤镜）
                 drawEffectPreview()
                 
+                // 保存离屏渲染纹理
+                if (this@CameraRenderSurfaceTextureOffScreenSharedContext.saveOffscreenFlag) {
+                    this@CameraRenderSurfaceTextureOffScreenSharedContext.saveOffscreenFlag = false
+                    saveOffscreenTexture()
+                }
+                
                 // 解绑帧缓冲区
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                 
                 // 交换缓冲区，确保渲染结果写入纹理
                 EGL14.eglSwapBuffers(eglDisplay, localEglSurface)
             } catch (e: Exception) {
-                Log.e(TAG, "处理纹理异常: ${e.message}", e)
+                Log.e(TAG, "处理纹理异常-1: ${e.message}", e)
+            }
+        }
+        
+        /**
+         * 保存离屏渲染纹理到文件
+         */
+        private fun saveOffscreenTexture() {
+            // 检查是否已达到最大保存数量
+            if (offscreenImageCounter.get() >= MAX_DEBUG_IMAGES) {
+                // 如果显示也达到最大保存数量，停止保存任务
+                if (displayImageCounter.get() >= MAX_DEBUG_IMAGES) {
+                    saveTimer.shutdown()
+                    isTimerRunning = false
+                }
+                return
+            }
+            
+            try {
+                // 使用内部存储的纹理尺寸来读取像素数据，避免与外部类的竞态条件
+                val textureWidth = currentTextureWidth
+                val textureHeight = currentTextureHeight
+                // 读取离屏纹理的像素数据
+                val pixelBuffer = ByteBuffer.allocateDirect(textureWidth * textureHeight * 4)
+                pixelBuffer.order(ByteOrder.nativeOrder())
+                GLES20.glReadPixels(0, 0, textureWidth, textureHeight, 
+                                  GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixelBuffer)
+                
+                // 将像素数据转换为Bitmap
+                pixelBuffer.rewind()
+                val bitmap = Bitmap.createBitmap(textureWidth, textureHeight, Bitmap.Config.ARGB_8888)
+                bitmap.copyPixelsFromBuffer(pixelBuffer)
+                
+                // 使用单独的线程保存文件，避免阻塞离屏线程
+                Executors.newSingleThreadExecutor().execute { saveOffscreenBitmapToFile(bitmap) }
+            } catch (e: Exception) {
+                Log.e(TAG, "保存离屏纹理异常: ${e.message}", e)
+            }
+        }
+        
+        /**
+         * 保存离屏渲染的Bitmap到文件
+         */
+        private fun saveOffscreenBitmapToFile(bitmap: Bitmap) {
+            try {
+                // 创建保存目录
+                val externalDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                val debugImageDir = File(externalDir, "tem_imgs")
+                if (!debugImageDir.exists()) {
+                    debugImageDir.mkdirs()
+                }
+                
+                // 生成文件名：offscreen_count_width_height.png
+                // 注意：bitmap 的尺寸已经在 saveOffscreenTexture 中使用 currentTextureWidth/Height 创建
+                val imageNum = offscreenImageCounter.incrementAndGet()
+                val fileName = "offscreen_${imageNum}_${bitmap.width}_${bitmap.height}.png"
+                val file = File(debugImageDir, fileName)
+                
+                // 保存Bitmap到文件
+                val fos = FileOutputStream(file)
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                fos.flush()
+                fos.close()
+                
+                Log.d(TAG, "成功保存离屏纹理图片: ${file.absolutePath}")
+                
+                // 释放Bitmap资源
+                bitmap.recycle()
+            } catch (e: Exception) {
+                Log.e(TAG, "保存离屏纹理文件失败: ${e.message}", e)
             }
         }
         
@@ -1395,40 +1421,83 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
         }
         
         /**
-         * 清理资源
+         * 更新纹理尺寸
+         * 
+         * 修复偶发半屏显示问题：同步更新 EGL Surface 尺寸以匹配纹理尺寸
+         * 
+         * @param previewWidth 相机预览宽度（如1280）
+         * @param previewHeight 相机预览高度（如720）
          */
-        private fun cleanup() {
-            try {
-                // 解绑上下文
-                EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                
-                // 销毁表面
-                if (localEglSurface != null) {
-                    EGL14.eglDestroySurface(eglDisplay, localEglSurface)
+        @Synchronized
+        fun updateTextureSize(previewWidth: Int, previewHeight: Int) {
+            if (localEglContext == null || !isRunning) {
+                Log.w(TAG, "离屏线程未初始化或已停止，跳过尺寸更新")
+                return
+            }
+            
+            // 确保在EGL上下文中执行
+            val isCurrent = EGL14.eglMakeCurrent(eglDisplay, localEglSurface, localEglSurface, localEglContext)
+            if (isCurrent) {
+                    try {
+                        // 使用互换后的尺寸，与初始化逻辑保持一致
+                        // 相机预览帧是横屏的（宽>高），需要旋转90度显示，所以宽高互换
+                        val textureWidth = previewHeight
+                        val textureHeight = previewWidth
+                        
+                        // 1. 更新纹理尺寸
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, localTextureId)
+                        GLES20.glTexImage2D(
+                            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                            textureWidth, textureHeight, 0,
+                            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+                        )
+                        
+                        // 2. 重新创建 EGL Surface 以匹配新尺寸（关键修复）
+                        // 原问题：EGL Surface 尺寸未更新，导致渲染输出与纹理尺寸不匹配，出现半屏显示
+                        EGL14.eglDestroySurface(eglDisplay, localEglSurface)
+                        val surfaceAttribs = intArrayOf(
+                            EGL14.EGL_WIDTH, textureWidth,
+                            EGL14.EGL_HEIGHT, textureHeight,
+                            EGL14.EGL_NONE
+                        )
+                        localEglSurface = EGL14.eglCreatePbufferSurface(
+                            eglDisplay, eglConfig, surfaceAttribs, 0
+                        )
+                        if (localEglSurface == EGL14.EGL_NO_SURFACE) {
+                            Log.e(TAG, "重新创建 EGL Surface 失败")
+                            return
+                        }
+                        
+                        // 使新 Surface 当前化
+                        if (!EGL14.eglMakeCurrent(eglDisplay, localEglSurface, localEglSurface, localEglContext)) {
+                            Log.e(TAG, "使新 EGL Surface 当前化失败")
+                            return
+                        }
+                        
+                        // 3. 重新绑定帧缓冲区
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, localFramebufferId)
+                        GLES20.glFramebufferTexture2D(
+                            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                            GLES20.GL_TEXTURE_2D, localTextureId, 0
+                        )
+                        
+                        // 检查帧缓冲区是否完整
+                        val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+                        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+                            Log.e(TAG, "离屏帧缓冲区不完整: $status")
+                        }
+                        
+                        // 更新内部存储的纹理尺寸
+                        currentTextureWidth = textureWidth
+                        currentTextureHeight = textureHeight
+                        
+                        Log.d(TAG, "离屏纹理和 EGL Surface 尺寸更新成功: ${textureWidth}x${textureHeight}")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "更新纹理尺寸异常: ${e.message}", e)
+                    }
                 }
-                
-                // 销毁上下文
-                if (localEglContext != null) {
-                    EGL14.eglDestroyContext(eglDisplay, localEglContext)
-                }
-                
-                // 释放OpenGL资源
-                if (localFramebufferId != 0) {
-                    val framebuffers = intArrayOf(localFramebufferId)
-                    GLES20.glDeleteFramebuffers(1, framebuffers, 0)
-                }
-                
-                if (originalProgramId != 0) {
-                    GLES20.glDeleteProgram(originalProgramId)
-                }
-                
-                if (filteredProgramId != 0) {
-                    GLES20.glDeleteProgram(filteredProgramId)
-                }
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "清理资源异常: ${e.message}", e)
             }
         }
+        
+
     }
-}
