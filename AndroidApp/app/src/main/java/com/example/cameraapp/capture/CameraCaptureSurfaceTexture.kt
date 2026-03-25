@@ -45,6 +45,7 @@ class CameraCaptureSurfaceTexture(
     private var previewRequestBuilder: CaptureRequest.Builder? = null
     private var previewRequest: CaptureRequest? = null
     private var selectedPreviewSize: Size? = null
+    private var previewSurface: Surface? = null  // 预览Surface，需要在stop时释放
     
     private var cameraCallback: CameraCapture.CameraCallback? = null
 
@@ -97,10 +98,17 @@ class CameraCaptureSurfaceTexture(
     override fun stop() {
         try {
             cameraCaptureSession?.close()
+            cameraCaptureSession = null
+            
             cameraDevice?.close()
+            cameraDevice = null
+            
+            previewSurface?.release()
+            previewSurface = null
+            
             stopBackgroundThread()
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping camera: ${e.message}", e)
+            Log.e(TAG, "停止相机时出错: ${e.message}", e)
         }
     }
 
@@ -123,11 +131,15 @@ class CameraCaptureSurfaceTexture(
     private fun stopBackgroundThread() {
         handlerThread?.quitSafely()
         try {
-            handlerThread?.join()
+            handlerThread?.join(2000)  // 最多等待2秒
+            if (handlerThread?.isAlive == true) {
+                Log.w(TAG, "后台线程未在指定时间内结束，尝试强制中断")
+                handlerThread?.interrupt()
+            }
             handlerThread = null
             cameraHandler = null
         } catch (e: InterruptedException) {
-            Log.e(TAG, "Error stopping background thread: ${e.message}", e)
+            Log.e(TAG, "停止后台线程时出错: ${e.message}", e)
         }
     }
 
@@ -185,11 +197,12 @@ class CameraCaptureSurfaceTexture(
             previewRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
 
             // SurfaceTexture模式：使用SurfaceTexture作为输出目标
+            // 注意：每次创建新的Surface，并在stop时释放，避免SurfaceTexture状态不一致
             surfaceTexture.setDefaultBufferSize(TARGET_WIDTH, TARGET_HEIGHT)
-            val surface = Surface(surfaceTexture)
-            outputSurfaces.add(surface)
-            previewRequestBuilder!!.addTarget(surface)
-            Log.d(TAG, "使用SurfaceTexture作为输出目标")
+            previewSurface = Surface(surfaceTexture)
+            outputSurfaces.add(previewSurface!!)
+            previewRequestBuilder!!.addTarget(previewSurface!!)
+            Log.d(TAG, "创建预览Surface")
 
             // 配置相机参数
             configureCameraParameters()

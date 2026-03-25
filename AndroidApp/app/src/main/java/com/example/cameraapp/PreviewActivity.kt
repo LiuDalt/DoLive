@@ -80,6 +80,7 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
         // 初始化切换摄像头按钮
         switchCameraButton = findViewById(R.id.switch_camera_button)
         switchCameraButton.setOnClickListener {
+            Toast.makeText(this, "切换摄像头", Toast.LENGTH_SHORT).show()
             // 切换摄像头
             switchCamera()
         }
@@ -181,13 +182,11 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
      */
     private fun startCamera(surfaceTexture: SurfaceTexture? = null) {
         try {
-            // 停止并释放旧的相机捕获实例
             cameraCapture?.stop()
             cameraCapture = null
             
             Log.d(TAG, "启动相机，预览类型: $currentPreviewType，摄像头: ${if (currentCameraLens == CameraCharacteristics.LENS_FACING_FRONT) "前置" else "后置"}")
             
-            // 根据当前预览类型创建不同的相机捕获实例
             cameraCapture = when (currentPreviewType) {
                 PreviewType.SURFACE_TEXTURE, PreviewType.SURFACE_TEXTURE_OFFSCREEN, PreviewType.SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT -> {
                     requireNotNull(surfaceTexture) { "SurfaceTexture模式下SurfaceTexture不能为空" }
@@ -268,7 +267,6 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
                 }
             })
 
-            // 启动相机预览
             cameraCapture?.start()
         } catch (e: Exception) {
             Log.e(TAG, "启动相机失败: ${e.message}", e)
@@ -328,6 +326,8 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
 
     /**
      * 切换摄像头
+     * 
+     * 修复：切换摄像头时重新创建 SurfaceTexture，解决 onFrameAvailable 不再被触发的问题
      */
     private fun switchCamera() {
         // 切换摄像头方向
@@ -336,20 +336,52 @@ class PreviewActivity : AppCompatActivity(), SurfaceTextureRenderer.SurfaceTextu
         } else {
             CameraCharacteristics.LENS_FACING_FRONT
         }
-        
         Log.d(TAG, "切换到${if (currentCameraLens == CameraCharacteristics.LENS_FACING_FRONT) "前置" else "后置"}摄像头")
         
-        // 停止当前相机
         cameraCapture?.stop()
         cameraCapture = null
-        
-        // 重置相机准备标志
         cameraRenderer.setCameraActive(false)
         
-        // 根据当前预览类型重新启动相机
-        if (hasCameraPermission) {
-            startCamera(surfaceTexture)
+        // 对于所有 SurfaceTexture 相关预览类型，重新创建 GLSurfaceView 以获取新的 SurfaceTexture
+        // 这是解决切换摄像头后 onFrameAvailable 不再被触发的关键修复
+        if (currentPreviewType == PreviewType.SURFACE_TEXTURE
+            || currentPreviewType == PreviewType.SURFACE_TEXTURE_OFFSCREEN
+            || currentPreviewType == PreviewType.SURFACE_TEXTURE_OFFSCREEN_SHARED_CONTEXT) {
+            recreateGLSurfaceView()
+        } else {
+            if (hasCameraPermission) {
+                startCamera(surfaceTexture)
+            } else {
+                Log.w(TAG, "无相机权限，无法启动相机")
+            }
         }
+    }
+    
+    /**
+     * 重新创建 GLSurfaceView
+     * 
+     * 用于切换摄像头时获取全新的 SurfaceTexture，解决 onFrameAvailable 回调问题
+     */
+    private fun recreateGLSurfaceView() {
+        // 释放旧的渲染器资源
+        cameraRenderer.release()
+        surfaceTexture = null
+        
+        // 从父视图中移除旧的 GLSurfaceView
+        val parent = glSurfaceView.parent as? android.view.ViewGroup
+        parent?.removeView(glSurfaceView)
+        
+        // 创建新的 GLSurfaceView 实例
+        glSurfaceView = GLSurfaceView(this)
+        glSurfaceView.id = R.id.preview_view
+        glSurfaceView.layoutParams = android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        parent?.addView(glSurfaceView, 0)
+        
+        setupGLSurfaceView()
+        glSurfaceView.onResume()
     }
     
     /**

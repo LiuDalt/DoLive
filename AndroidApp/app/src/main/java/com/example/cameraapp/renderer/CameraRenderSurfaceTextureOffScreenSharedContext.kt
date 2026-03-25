@@ -669,12 +669,17 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
     }
 
     override fun onDrawFrame(gl: javax.microedition.khronos.opengles.GL10?) {
+        // 检查相机是否就绪
+        if (!isCameraReady) {
+            // 相机未就绪，只清空屏幕，不渲染
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            return
+        }
 
         // 确保离屏线程初始化完成后再更新尺寸
         if (needUpdateTextureSize && isSharedTextureReady) {
             // 更新离屏线程纹理尺寸
             // 注意：updateTextureSize 内部会进行尺寸互换，所以传入原始相机预览尺寸
-            Log.d(TAG, "onDrawFrame: 更新离屏纹理尺寸为: ${cameraPreviewWidth}x${cameraPreviewHeight}")
             offscreenThread?.updateTextureSize(cameraPreviewWidth, cameraPreviewHeight)
             needUpdateTextureSize = false
         }
@@ -825,6 +830,12 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
 
     override fun setCameraActive(active: Boolean) {
         isCameraReady = active
+        if (!active) {
+            // 重置帧可用标志
+            synchronized(frameAvailableLock) {
+                frameAvailable = false
+            }
+        }
     }
 
     override fun release() {
@@ -1214,7 +1225,9 @@ class CameraRenderSurfaceTextureOffScreenSharedContext(private val context: Cont
          * 处理纹理
          */
         private fun processTexture() {
-            if (!isCameraReady) return
+            if (!isCameraReady) {
+                return
+            }
             
             try {
                 // 绑定帧缓冲区
